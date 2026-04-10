@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>DUALITY: MIND SPLIT — хардкорная аркада (исправленная)</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #0b0c10;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-family: 'Segoe UI', 'Courier New', monospace;
+        }
+
+        .game-container {
+            background: #1a1e26;
+            border-radius: 24px;
+            padding: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+        }
+
+        canvas {
+            display: block;
+            margin: 0 auto;
+            width: 800px;
+            height: 600px;
+            border-radius: 16px;
+            box-shadow: inset 0 0 40px #00000055, 0 0 0 2px #2c3e50;
+            cursor: none;
+            background: radial-gradient(circle at 50% 50%, #1e2a3a, #0f1419);
+            touch-action: none;
+        }
+
+        .status-panel {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-top: 16px;
+            color: #9bb8da;
+            text-shadow: 0 0 8px #3e6b9c;
+            font-weight: 600;
+            letter-spacing: 1px;
+        }
+
+        .score {
+            font-size: 28px;
+            background: #0f1a24;
+            padding: 8px 24px;
+            border-radius: 40px;
+            border: 1px solid #2c5a7a;
+            box-shadow: inset 0 2px 5px #00000088, 0 4px 0 #0a1219;
+            color: #d4f2ff;
+        }
+
+        .hint {
+            font-size: 16px;
+            opacity: 0.8;
+            background: #0f1a2466;
+            padding: 6px 18px;
+            border-radius: 30px;
+            backdrop-filter: blur(4px);
+            border: 1px solid #3a5f7a55;
+        }
+
+        button {
+            background: #1e3b4f;
+            border: none;
+            color: white;
+            font-weight: bold;
+            font-size: 18px;
+            padding: 8px 22px;
+            border-radius: 40px;
+            border-bottom: 4px solid #0a1922;
+            cursor: pointer;
+            transition: 0.1s ease;
+            box-shadow: 0 4px 0 #0c1a24;
+            letter-spacing: 1px;
+        }
+
+        button:hover {
+            background: #2a5068;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 0 #0c1a24;
+        }
+
+        button:active {
+            transform: translateY(2px);
+            box-shadow: 0 2px 0 #0c1a24;
+        }
+
+        .game-over-message {
+            color: #ff6b7c;
+            font-weight: bold;
+            text-align: center;
+            margin-top: 8px;
+            font-size: 20px;
+            text-transform: uppercase;
+            letter-spacing: 4px;
+        }
+
+        .invulnerable-indicator {
+            position: absolute;
+            /* не используется, индикатор встроен в анимацию точек */
+        }
+    </style>
+</head>
+<body>
+<div class="game-container">
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    <div class="status-panel">
+        <div class="score">⚡ <span id="scoreDisplay">00.0</span>s</div>
+        <div class="hint">🌀 СИНИЙ (мышь) ↔ КРАСНЫЙ (зеркало)</div>
+        <button id="restartButton">⟳ НОВАЯ ИГРА</button>
+    </div>
+    <div id="gameOverMsg" class="game-over-message"></div>
+</div>
+
+<script>
+    (function(){
+        "use strict";
+
+        // ----- КОНФИГУРАЦИЯ -----
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreSpan = document.getElementById('scoreDisplay');
+        const gameOverMsg = document.getElementById('gameOverMsg');
+
+        const W = 800, H = 600;
+        const CENTER_X = W / 2, CENTER_Y = H / 2;
+
+        const PLAYER_RADIUS = 12;
+        const ANNIHILATION_DIST = 38;
+
+        const ENEMY_RADIUS = 14;
+        const ENEMY_BASE_SPEED = 2.4;
+        const ENEMY_SPAWN_INTERVAL = 10000;
+        const MAX_ENEMIES = 100;
+        const WALL_BOUNCE_FACTOR = 0.98;
+
+        // Неуязвимость после старта (мс)
+        const INVULN_DURATION = 3000;
+
+        // ----- СОСТОЯНИЕ -----
+        let gameActive = false;
+        let gameOverFlag = false;
+        let animationFrame = null;
+        let startTimestamp = 0;
+        let survivalTime = 0;
+
+        // Неуязвимость
+        let invulnerableUntil = 0;
+
+        // Позиции
+        let mouseX = CENTER_X, mouseY = CENTER_Y;
+        let mirrorX = CENTER_X, mirrorY = CENTER_Y;
+
+        // Враги
+        let enemies = [];
+        let lastSpawnTime = 0;
+
+        // Флаг, что мышь ещё не двигалась после старта (чтобы не перезаписывать центр сразу)
+        let mouseMovedAfterReset = false;
+
+        // ----- ФУНКЦИИ -----
+        function updateMirrorPosition() {
+            mirrorX = W - mouseX;
+            mirrorY = H - mouseY;
+        }
+
+        // Проверка: активна ли неуязвимость
+        function isInvulnerable() {
+            return performance.now() < invulnerableUntil;
+        }
+
+        function checkAnnihilation() {
+            if (isInvulnerable()) return false;
+            const dx = mouseX - mirrorX;
+            const dy = mouseY - mirrorY;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < ANNIHILATION_DIST) {
+                gameOver('💥 АННИГИЛЯЦИЯ — точки слились');
+                return true;
+            }
+            return false;
+        }
+
+        function checkCollisionWithEnemies() {
+            if (isInvulnerable()) return false;
+            for (let e of enemies) {
+                const dxBlue = mouseX - e.x;
+                const dyBlue = mouseY - e.y;
+                const distBlue = Math.sqrt(dxBlue*dxBlue + dyBlue*dyBlue);
+                if (distBlue < PLAYER_RADIUS + ENEMY_RADIUS) {
+                    gameOver('🔵 Синяя точка уничтожена глюоном');
+                    return true;
+                }
+                const dxRed = mirrorX - e.x;
+                const dyRed = mirrorY - e.y;
+                const distRed = Math.sqrt(dxRed*dxRed + dyRed*dyRed);
+                if (distRed < PLAYER_RADIUS + ENEMY_RADIUS) {
+                    gameOver('🔴 Красная точка уничтожена глюоном');
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function gameOver(reason = '') {
+            if (!gameActive) return;
+            gameActive = false;
+            gameOverFlag = true;
+            if (animationFrame) {
+                cancelAnimationFrame(animationFrame);
+                animationFrame = null;
+            }
+            gameOverMsg.innerText = `☠️ GAME OVER — ${reason || 'поражение'} ☠️`;
+            draw();
+        }
+
+        function resetGame() {
+            if (animationFrame) {
+                cancelAnimationFrame(animationFrame);
+                animationFrame = null;
+            }
+            
+            // Сброс состояния
+            gameActive = true;
+            gameOverFlag = false;
+            survivalTime = 0;
+            enemies = [];
+            mouseMovedAfterReset = false;   // мышь пока не двигали
+            
+            // Принудительно ставим в центр
+            mouseX = CENTER_X;
+            mouseY = CENTER_Y;
+            updateMirrorPosition();
+            
+            const now = performance.now();
+            startTimestamp = now;
+            lastSpawnTime = now;
+            invulnerableUntil = now + INVULN_DURATION;
+            
+            gameOverMsg.innerText = '';
+            animationFrame = requestAnimationFrame(gameLoop);
+        }
+
+        function spawnEnemy() {
+            if (enemies.length >= MAX_ENEMIES) return;
+            const side = Math.floor(Math.random() * 4);
+            let x, y;
+            if (side === 0) { x = -ENEMY_RADIUS; y = Math.random() * H; }
+            else if (side === 1) { x = W + ENEMY_RADIUS; y = Math.random() * H; }
+            else if (side === 2) { x = Math.random() * W; y = -ENEMY_RADIUS; }
+            else { x = Math.random() * W; y = H + ENEMY_RADIUS; }
+            
+            const angleToCenter = Math.atan2(CENTER_Y - y, CENTER_X - x);
+            const angleVariation = (Math.random() - 0.5) * 1.2;
+            const angle = angleToCenter + angleVariation;
+            const speed = ENEMY_BASE_SPEED * (0.9 + Math.random() * 0.4);
+            const vx = Math.cos(angle) * speed;
+            const vy = Math.sin(angle) * speed;
+            
+            enemies.push({ x, y, vx, vy, radius: ENEMY_RADIUS });
+        }
+
+        function updateEnemies() {
+            for (let e of enemies) {
+                e.x += e.vx;
+                e.y += e.vy;
+                
+                if (e.x - e.radius < 0) { e.x = e.radius; e.vx = -e.vx * WALL_BOUNCE_FACTOR; }
+                else if (e.x + e.radius > W) { e.x = W - e.radius; e.vx = -e.vx * WALL_BOUNCE_FACTOR; }
+                
+                if (e.y - e.radius < 0) { e.y = e.radius; e.vy = -e.vy * WALL_BOUNCE_FACTOR; }
+                else if (e.y + e.radius > H) { e.y = H - e.radius; e.vy = -e.vy * WALL_BOUNCE_FACTOR; }
+                
+                const sp = Math.sqrt(e.vx*e.vx + e.vy*e.vy);
+                const maxSp = ENEMY_BASE_SPEED * 1.8;
+                if (sp > maxSp) { e.vx *= maxSp / sp; e.vy *= maxSp / sp; }
+            }
+        }
+
+        function gameLoop(now) {
+            if (!gameActive) return;
+            
+            survivalTime = (now - startTimestamp) / 1000;
+            scoreSpan.innerText = survivalTime.toFixed(1);
+            
+            updateMirrorPosition();
+            
+            if (checkAnnihilation()) return;
+            if (checkCollisionWithEnemies()) return;
+            
+            if (now - lastSpawnTime > ENEMY_SPAWN_INTERVAL) {
+                spawnEnemy();
+                lastSpawnTime = now;
+            }
+            
+            updateEnemies();
+            draw();
+            
+            animationFrame = requestAnimationFrame(gameLoop);
+        }
+
+        // ----- ОТРИСОВКА (с индикацией неуязвимости) -----
+        function draw() {
+            ctx.clearRect(0, 0, W, H);
+            
+            const enemyCount = enemies.length;
+            const dangerFactor = Math.min(enemyCount / 12, 1.0);
+            const bgGrad = ctx.createRadialGradient(CENTER_X, CENTER_Y, 50, CENTER_X, CENTER_Y, 400);
+            bgGrad.addColorStop(0, `rgb(${20 + 40*dangerFactor}, ${30 + 20*dangerFactor}, ${50 + 30*dangerFactor})`);
+            bgGrad.addColorStop(1, `rgb(${5}, ${8}, ${15})`);
+            ctx.fillStyle = bgGrad;
+            ctx.fillRect(0, 0, W, H);
+            
+            // Сетка
+            ctx.strokeStyle = '#4a6c8f33';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(CENTER_X, 0); ctx.lineTo(CENTER_X, H);
+            ctx.moveTo(0, CENTER_Y); ctx.lineTo(W, CENTER_Y);
+            ctx.stroke();
+            
+            // Линия связи
+            const dx = mouseX - mirrorX;
+            const dy = mouseY - mirrorY;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            const dangerRatio = Math.max(0, 1 - (dist - ANNIHILATION_DIST) / 60);
+            ctx.beginPath();
+            ctx.moveTo(mouseX, mouseY);
+            ctx.lineTo(mirrorX, mirrorY);
+            ctx.strokeStyle = `rgba(200, 100, 255, ${0.2 + dangerRatio*0.5})`;
+            ctx.lineWidth = 2 + dangerRatio * 4;
+            ctx.stroke();
+            
+            // Враги
+            for (let e of enemies) {
+                const grad = ctx.createRadialGradient(e.x-5, e.y-5, 2, e.x, e.y, e.radius+2);
+                grad.addColorStop(0, '#ffe484');
+                grad.addColorStop(0.7, '#c97b2d');
+                grad.addColorStop(1, '#6b2e0e');
+                ctx.beginPath();
+                ctx.arc(e.x, e.y, e.radius, 0, Math.PI*2);
+                ctx.fillStyle = grad;
+                ctx.fill();
+                ctx.shadowColor = '#ffaa33';
+                ctx.shadowBlur = 12;
+                ctx.fill();
+                ctx.shadowBlur = 0;
+                ctx.strokeStyle = '#f0d090';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                
+                ctx.beginPath();
+                ctx.arc(e.x-3, e.y-3, 4, 0, Math.PI*2);
+                ctx.fillStyle = '#ffffff60';
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(e.x-5, e.y-5, 2, 0, Math.PI*2);
+                ctx.fillStyle = '#000000cc';
+                ctx.fill();
+            }
+            
+            // Проверка неуязвимости для анимации мерцания
+            const invulnActive = isInvulnerable();
+            const blink = invulnActive ? (Math.floor(performance.now() / 150) % 2 === 0) : true;
+            
+            // Синяя точка
+            ctx.shadowColor = '#3e9bff';
+            ctx.shadowBlur = invulnActive ? 30 : 20;
+            ctx.beginPath();
+            ctx.arc(mouseX, mouseY, PLAYER_RADIUS, 0, 2*Math.PI);
+            const blueGrad = ctx.createRadialGradient(mouseX-4, mouseY-4, 2, mouseX, mouseY, PLAYER_RADIUS+4);
+            blueGrad.addColorStop(0, '#a0d0ff');
+            blueGrad.addColorStop(1, '#1e5ab5');
+            ctx.fillStyle = blueGrad;
+            if (blink || !invulnActive) {
+                ctx.fill();
+            }
+            ctx.strokeStyle = invulnActive ? '#ffffc0' : '#cce6ff';
+            ctx.lineWidth = invulnActive ? 4 : 3;
+            ctx.stroke();
+            
+            // Красная точка
+            ctx.shadowColor = '#ff5e6b';
+            ctx.shadowBlur = invulnActive ? 30 : 20;
+            ctx.beginPath();
+            ctx.arc(mirrorX, mirrorY, PLAYER_RADIUS, 0, 2*Math.PI);
+            const redGrad = ctx.createRadialGradient(mirrorX-4, mirrorY-4, 2, mirrorX, mirrorY, PLAYER_RADIUS+4);
+            redGrad.addColorStop(0, '#ffb0b8');
+            redGrad.addColorStop(1, '#b51e2e');
+            ctx.fillStyle = redGrad;
+            if (blink || !invulnActive) {
+                ctx.fill();
+            }
+            ctx.strokeStyle = invulnActive ? '#ffffc0' : '#ffd0d5';
+            ctx.lineWidth = invulnActive ? 4 : 3;
+            ctx.stroke();
+            
+            ctx.shadowBlur = 0;
+            
+            // Текст неуязвимости
+            if (invulnActive && gameActive) {
+                ctx.font = 'bold 16px monospace';
+                ctx.fillStyle = '#ffe484';
+                ctx.shadowColor = '#ffaa00';
+                ctx.shadowBlur = 10;
+                ctx.textAlign = 'center';
+                ctx.fillText('✨ НЕУЯЗВИМОСТЬ ✨', CENTER_X, 50);
+                ctx.shadowBlur = 0;
+            }
+            
+            if (!gameActive && gameOverFlag) {
+                ctx.fillStyle = '#000000aa';
+                ctx.fillRect(0, 0, W, H);
+                ctx.font = 'bold 28px "Segoe UI", monospace';
+                ctx.fillStyle = '#ffcaca';
+                ctx.shadowColor = '#ff0000';
+                ctx.shadowBlur = 16;
+                ctx.textAlign = 'center';
+                ctx.fillText('ИГРА ОКОНЧЕНА', CENTER_X, CENTER_Y - 20);
+                ctx.font = '18px monospace';
+                ctx.fillText('ПРОБЕЛ или кнопка "НОВАЯ ИГРА"', CENTER_X, CENTER_Y + 30);
+                ctx.shadowBlur = 0;
+            } else if (!gameActive && !gameOverFlag) {
+                ctx.font = 'bold 22px monospace';
+                ctx.fillStyle = '#aaccff';
+                ctx.textAlign = 'center';
+                ctx.fillText('НАЖМИ "НОВАЯ ИГРА"', CENTER_X, CENTER_Y);
+            }
+            
+            if (gameActive) {
+                ctx.font = '12px monospace';
+                ctx.fillStyle = '#c0daf5';
+                ctx.textAlign = 'right';
+                ctx.fillText(`дистанция: ${Math.round(dist)}`, W-15, 30);
+            }
+        }
+
+        // ----- ОБРАБОТЧИКИ (с учётом mouseMovedAfterReset) -----
+        function handleMouseMove(e) {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            
+            let canvasX = (e.clientX - rect.left) * scaleX;
+            let canvasY = (e.clientY - rect.top) * scaleY;
+            
+            canvasX = Math.min(Math.max(canvasX, PLAYER_RADIUS), W - PLAYER_RADIUS);
+            canvasY = Math.min(Math.max(canvasY, PLAYER_RADIUS), H - PLAYER_RADIUS);
+            
+            mouseX = canvasX;
+            mouseY = canvasY;
+            mouseMovedAfterReset = true;
+            
+            if (gameActive) {
+                updateMirrorPosition();
+                checkAnnihilation();
+                checkCollisionWithEnemies();
+                draw();
+            } else {
+                draw();
+            }
+        }
+        
+        function handleTouchMove(e) {
+            e.preventDefault();
+            if (!gameActive) return;
+            const rect = canvas.getBoundingClientRect();
+            const touch = e.touches[0];
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            let canvasX = (touch.clientX - rect.left) * scaleX;
+            let canvasY = (touch.clientY - rect.top) * scaleY;
+            canvasX = Math.min(Math.max(canvasX, PLAYER_RADIUS), W - PLAYER_RADIUS);
+            canvasY = Math.min(Math.max(canvasY, PLAYER_RADIUS), H - PLAYER_RADIUS);
+            mouseX = canvasX;
+            mouseY = canvasY;
+            mouseMovedAfterReset = true;
+            updateMirrorPosition();
+            checkAnnihilation();
+            checkCollisionWithEnemies();
+            draw();
+        }
+        
+        function handleTouchStart(e) {
+            e.preventDefault();
+            handleTouchMove(e);
+        }
+        
+        function handleKeyDown(e) {
+            if (e.code === 'Space') {
+                e.preventDefault();
+                resetGame();
+            }
+        }
+        
+        document.getElementById('restartButton').addEventListener('click', () => {
+            resetGame();
+        });
+        
+        canvas.addEventListener('mousemove', handleMouseMove);
+        canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+        canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+        window.addEventListener('keydown', handleKeyDown);
+        canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+        
+        // Начальная отрисовка
+        draw();
+    })();
+</script>
+</body>
+</html>
